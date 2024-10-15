@@ -36,6 +36,7 @@ const register = (req, res) => {
     });
 };
 
+
 const login = (req, res) => {
     const { correo, password } = req.body;
 
@@ -50,38 +51,71 @@ const login = (req, res) => {
 
         const user = result[0];
 
+        // Verifica si la cuenta está bloqueada
+        if (user.cuenta_bloqueada) {
+            return res.status(403).send('Tu cuenta está bloqueada debido a múltiples intentos fallidos. Por favor, contacta al soporte.');
+        }
+
         if (!user.isVerified) {
             return res.status(400).send('Por favor, verifica tu cuenta antes de iniciar sesión.');
         }
 
         const passwordIsValid = bcrypt.compareSync(password, user.password);
         if (!passwordIsValid) {
-            return res.status(400).send('Correo o contraseña incorrectos');
+            // Incrementar el contador de intentos fallidos
+            connection.query("UPDATE usuarios SET intentos_fallidos = intentos_fallidos + 1 WHERE correo = ?", [correo], (err) => {
+                if (err) {
+                    return res.status(500).send('Error al actualizar intentos fallidos');
+                }
+            });
+
+            // Verificar si se superó el límite de intentos
+            connection.query("SELECT intentos_fallidos FROM usuarios WHERE correo = ?", [correo], (err, result) => {
+                if (err) {
+                    return res.status(500).send('Error en la base de datos');
+                }
+
+                const attempts = result[0].intentos_fallidos;
+                if (attempts >= 5) {
+                    // Bloquear la cuenta
+                    connection.query("UPDATE usuarios SET cuenta_bloqueada = TRUE WHERE correo = ?", [correo], (err) => {
+                        if (err) {
+                            return res.status(500).send('Error al bloquear la cuenta');
+                        }
+                    });
+                    return res.status(403).send('Tu cuenta ha sido bloqueada debido a múltiples intentos fallidos. Por favor, contacta al soporte.');
+                }
+
+                return res.status(400).send('Correo o contraseña incorrectos');
+            });
+        } else {
+            // Restablecer intentos fallidos si la contraseña es correcta
+            connection.query("UPDATE usuarios SET intentos_fallidos = 0 WHERE correo = ?", [correo], (err) => {
+                if (err) {
+                    return res.status(500).send('Error al restablecer intentos fallidos');
+                }
+
+                const sessionId = crypto.randomBytes(16).toString('hex');
+                req.session.sessionId = sessionId;
+
+                res.cookie('sessionId', sessionId, {
+                    httpOnly: true,
+                    secure: true,
+                    sameSite: 'Strict',
+                    maxAge: 30 * 60 * 1000 // 30 minutos
+                });
+
+                res.status(200).send({
+                    id: user.id,
+                    nombre: user.nombre,
+                    correo: user.correo,
+                });
+            });
         }
-
-        connection.query("UPDATE usuarios SET intentos_fallidos = 0 WHERE correo = ?", [correo], (err) => {
-            if (err) {
-                return res.status(500).send('Error al restablecer intentos fallidos');
-            }
-
-            const sessionId = crypto.randomBytes(16).toString('hex');
-            req.session.sessionId = sessionId;
-
-            res.cookie('sessionId', sessionId, {
-                httpOnly: true,
-                secure: true,
-                sameSite: 'Strict',
-                maxAge: 30 * 60 * 1000
-            });
-
-            res.status(200).send({
-                id: user.id,
-                nombre: user.nombre,
-                correo: user.correo,
-            });
-        });
     });
 };
+
+
 const verifyEmail = (req, res) => {
     const { correo, token } = req.body;
 
